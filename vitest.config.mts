@@ -1,0 +1,57 @@
+import path from 'node:path';
+import { defineConfig } from 'vitest/config';
+
+export default defineConfig({
+  resolve: {
+    alias: { '@': path.resolve(import.meta.dirname, 'src') },
+  },
+  test: {
+    include: ['tests/**/*.test.ts'],
+    setupFiles: ['tests/setup.mts'],
+    hookTimeout: 120_000,
+    // The test files share the fake Cloudinary and Symplus ports.
+    fileParallelism: false,
+    env: {
+      NODE_ENV: 'test',
+      LOG_LEVEL: 'silent',
+      JWT_ACCESS_SECRET: 'test-secret-test-secret-test-secret-123',
+      BCRYPT_ROUNDS: '4',
+      GOOGLE_CLIENT_IDS: 'test-google-client.apps.googleusercontent.com',
+      REFERRAL_SIGNUP_URL: 'https://app.example.com/signup',
+      RATE_LIMIT_MAX: '100000',
+      AUTH_RATE_LIMIT_MAX: '100000',
+      UPLOAD_RATE_LIMIT_MAX: '100000',
+      HELPDESK_RATE_LIMIT_MAX: '100000',
+      CLOUDINARY_URL:
+        'cloudinary://test-key:test-secret@test-cloud?upload_prefix=http://127.0.0.1:4597',
+      DATA_ENCRYPTION_KEY: 'MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=',
+      PAYSTACK_ENABLED: 'true',
+      PAYSTACK_BASE_URL: 'http://127.0.0.1:4598',
+      PAYSTACK_SECRET_KEY: 'sk_test_fake_secret',
+      PAYSTACK_WEBHOOK_SECRET: 'whsec_fake_secret',
+      PAYSTACK_CALLBACK_URL: 'https://app.example.com/wallet/callback',
+      PAYSTACK_DVA_PROVIDER: 'test-bank',
+      WALLET_RATE_LIMIT_MAX: '100000',
+      RESEND_ENABLED: 'true',
+      RESEND_API_KEY: 're_test_fake_key',
+      RESEND_BASE_URL: 'http://127.0.0.1:4596',
+      RESEND_FROM: 'City Core <hello@example.com>',
+      EMAIL_SEND_INTERVAL_MS: '0',
+      EMAIL_SEND_RATE_LIMIT_MAX: '100000',
+      DOJAH_ENABLED: 'true',
+      DOJAH_BASE_URL: 'http://127.0.0.1:4595',
+      DOJAH_APP_ID: 'test-app-id',
+      DOJAH_SECRET_KEY: 'test_sk_fake',
+      KYC_MAX_NIN_LOOKUPS: '3',
+      KYC_RATE_LIMIT_MAX: '100000',
+      SYMPLUS_ENABLED: 'true',
+      SYMPLUS_BASE_URL: 'http://127.0.0.1:4599/sandbox/avazp/v5/cor/scs/',
+      SYMPLUS_TOKEN_URL: 'http://127.0.0.1:4599/sandbox/avazp/oauth/token',
+      SYMPLUS_CLIENT_KEY: 'test-client-key',
+      SYMPLUS_CLIENT_SECRET: 'test-client-secret',
+      SYMPLUS_DEFAULT_OFFICER_ID: 'OFF1',
+      SYMPLUS_MAX_READ_RETRIES: '1',
+      SYMPLUS_RATE_LIMIT_MAX: '100000',
+    },
+  },
+});

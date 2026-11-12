@@ -100,6 +100,15 @@ export const emailTemplates = {
       ttlMinutes,
     ),
 
+  signInCode: (code: string, ttlMinutes: number) =>
+    codeEmail(
+      'sign_in_code',
+      'Your sign-in code',
+      'Use this code to finish signing in to City Core. If this wasn’t you, change your password.',
+      code,
+      ttlMinutes,
+    ),
+
   welcome: (name: string) =>
     simple({
       template: 'welcome',

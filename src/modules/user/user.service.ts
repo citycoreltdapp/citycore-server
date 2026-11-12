@@ -111,7 +111,12 @@ class UserService extends BaseService<IUser> {
   /** A passport photograph starts as the avatar, but reviewers still need it once it's replaced. */
   private async removeUnusedAvatar(url: string | null): Promise<void> {
     if (!url) return;
-    if (await KycVerificationModel.exists({ 'passportPhoto.url': url })) return;
+    if (
+      await KycVerificationModel.exists({
+        $or: [{ 'selfie.url': url }, { 'companyLogo.url': url }],
+      })
+    )
+      return;
     await cloudinaryStorage.remove(url);
   }
 

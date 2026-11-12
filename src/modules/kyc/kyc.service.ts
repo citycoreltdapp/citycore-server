@@ -5,7 +5,7 @@ import { logger } from '@/config/logger';
 import { HttpStatus } from '@/constants/http';
 import { AppError } from '@/core/errors/AppError';
 import { cloudinaryStorage } from '@/integrations/cloudinary/cloudinary.client';
-import { dojahApi, dojahDisabled } from '@/integrations/dojah/dojah.client';
+import { dojahApi, dojahDisabled, type PersonIdentity } from '@/integrations/dojah/dojah.client';
 import { emailNotifications } from '@/modules/email/email.notifications';
 import { UserModel, type IUser } from '@/modules/user/user.model';
 import { userService } from '@/modules/user/user.service';
@@ -16,19 +16,33 @@ import {
   type IKycFile,
   type IKycVerification,
 } from './kyc.model';
-import type { DetailsBody, ListVerificationsQuery } from './kyc.schemas';
+import type {
+  BusinessDetailsBody,
+  BusinessLookupBody,
+  DetailsBody,
+  ListVerificationsQuery,
+  PayoutBody,
+  SignatoryBody,
+} from './kyc.schemas';
 
 export const KYC_STEPS = [
   'verify_nin',
   'personal_details',
+  'verify_company',
+  'company_details',
   'upload_documents',
+  'verify_signatory',
+  'upload_authorisation',
   'submit',
   'await_review',
   'complete',
 ] as const;
 export type KycStep = (typeof KYC_STEPS)[number];
 
-export type KycDocumentKind = 'passportPhoto' | 'utilityBill';
+export type KycDocumentKind = 'selfie' | 'utilityBill' | 'authorisationLetter' | 'companyLogo';
+
+const AVATAR_KINDS: readonly KycDocumentKind[] = ['selfie', 'companyLogo'];
+const CORPORATE_KINDS: readonly KycDocumentKind[] = ['authorisationLetter', 'companyLogo'];
 
 const MIN_AGE_YEARS = 18;
 const DUPLICATE_KEY = 11000;
@@ -47,6 +61,64 @@ const ninInUse = () =>
 
 const isDuplicateKey = (err: unknown): boolean =>
   (err as { code?: number } | null)?.code === DUPLICATE_KEY;
+
+const isCorporate = (user: HydratedDocument<IUser>) => user.accountType === 'corporate';
+
+const nameWords = (name: string) =>
+  name
+    .toUpperCase()
+    .replace(/[^A-Z\s-]/g, ' ')
+    .split(/[\s-]+/)
+    .filter((word) => word.length > 1);
+
+const samePerson = (expected: string, actual: string) => {
+  const words = new Set(nameWords(actual));
+  const required = nameWords(expected);
+  return required.length > 0 && required.every((word) => words.has(word));
+};
+
+const sameCompany = (a: string, b: string) => {
+  const normalise = (name: string) =>
+    name
+      .toUpperCase()
+      .replace(/\bLTD\b\.?/g, 'LIMITED')
+      .replace(/[^A-Z0-9]/g, '');
+  return normalise(a) === normalise(b);
+};
+
+const fullName = (identity: PersonIdentity) =>
+  [identity.firstName, identity.middleName, identity.lastName].filter(Boolean).join(' ');
+
+const countedLookup = async <T>(
+  kyc: KycDocument,
+  field: 'ninLookups' | 'businessLookups',
+  max: number,
+  lookup: () => Promise<T>,
+): Promise<T> => {
+  const counted = await KycVerificationModel.updateOne(
+    { _id: kyc._id, [field]: { $lt: max } },
+    { $inc: { [field]: 1 } },
+  ).exec();
+  if (counted.modifiedCount === 0) {
+    throw new AppError(
+      'You have made too many verification attempts. Contact support to continue',
+      HttpStatus.TOO_MANY_REQUESTS,
+      field === 'ninLookups' ? 'NIN_LOOKUP_LIMIT' : 'BUSINESS_LOOKUP_LIMIT',
+    );
+  }
+  try {
+    const result = await lookup();
+    kyc[field] += 1;
+    return result;
+  } catch (err) {
+    if (err instanceof AppError && err.code.startsWith('IDENTITY_')) {
+      await KycVerificationModel.updateOne({ _id: kyc._id }, { $inc: { [field]: -1 } }).exec();
+    } else {
+      kyc[field] += 1;
+    }
+    throw err;
+  }
+};
 
 const ageOn = (birth: Date, today: Date): number => {
   let age = today.getUTCFullYear() - birth.getUTCFullYear();
@@ -71,9 +143,17 @@ const fileView = (file: IKycFile | null | undefined) =>
 const nextStep = (kyc: KycDocument | null, user: HydratedDocument<IUser>): KycStep => {
   if (user.kycCompleted || kyc?.status === 'approved') return 'complete';
   if (kyc?.status === 'in_review') return 'await_review';
+  if (isCorporate(user)) {
+    if (!kyc?.business) return 'verify_company';
+    if (!kyc.business.detailsCompletedAt) return 'company_details';
+    if (!kyc.utilityBill) return 'upload_documents';
+    if (!kyc.signatory) return 'verify_signatory';
+    if (!kyc.signatory.onCacRecord && !kyc.authorisationLetter) return 'upload_authorisation';
+    return 'submit';
+  }
   if (!kyc?.ninVerifiedAt) return 'verify_nin';
   if (!kyc.detailsCompletedAt) return 'personal_details';
-  if (!kyc.passportPhoto || !kyc.utilityBill) return 'upload_documents';
+  if (!kyc.selfie || !kyc.utilityBill) return 'upload_documents';
   return 'submit';
 };
 
@@ -86,6 +166,7 @@ const customerView = (kyc: KycDocument | null, user: HydratedDocument<IUser>) =>
   return {
     /** False while Dojah is switched off, so a frontend can hide or disable the verify button. */
     available: env.DOJAH_ENABLED,
+    accountType: user.accountType,
     status: kyc?.status ?? 'not_started',
     nextStep: step,
     /** Whether the customer can still change anything. */
@@ -126,9 +207,18 @@ const customerView = (kyc: KycDocument | null, user: HydratedDocument<IUser>) =>
         gender: !!identity?.gender,
       },
     },
+    business: kyc?.business ?? null,
+    signatory: kyc?.signatory ?? null,
+    payout: kyc?.payout ?? null,
+    businessLookupsRemaining: Math.max(
+      0,
+      env.KYC_MAX_BUSINESS_LOOKUPS - (kyc?.businessLookups ?? 0),
+    ),
     documents: {
-      passportPhoto: fileView(kyc?.passportPhoto),
+      selfie: fileView(kyc?.selfie),
       utilityBill: fileView(kyc?.utilityBill),
+      authorisationLetter: fileView(kyc?.authorisationLetter),
+      companyLogo: fileView(kyc?.companyLogo),
     },
     submittedAt: kyc?.submittedAt ?? null,
     reviewedAt: kyc?.reviewedAt ?? null,
@@ -164,9 +254,18 @@ const findOrCreateForUser = async (userId: string): Promise<KycDocument> =>
   ).exec()) as KycDocument;
 
 /** Loads the user and their record for a change, after checking that a change is allowed. */
-const loadForChange = async (userId: string) => {
+const loadForChange = async (userId: string, flow?: 'personal' | 'corporate') => {
   const user = await userService.findById(userId);
   assertCanStart(user);
+  if (flow === 'corporate' && !isCorporate(user)) {
+    throw AppError.forbidden('Only corporate accounts verify a business', 'NOT_CORPORATE');
+  }
+  if (flow === 'personal' && isCorporate(user)) {
+    throw AppError.forbidden(
+      'Corporate accounts verify their business instead',
+      'CORPORATE_ACCOUNT',
+    );
+  }
   const kyc = await findOrCreateForUser(userId);
   assertEditable(kyc);
   return { user, kyc };
@@ -184,7 +283,7 @@ export const kycService = {
    */
   async verifyNin(userId: string, nin: string) {
     if (!env.DOJAH_ENABLED) throw dojahDisabled();
-    const { user, kyc } = await loadForChange(userId);
+    const { user, kyc } = await loadForChange(userId, 'personal');
 
     const ninHash = hashNin(nin);
     const current = await KycVerificationModel.findById(kyc.id).select('+ninHash').lean().exec();
@@ -193,21 +292,9 @@ export const kycService = {
 
     if (await KycVerificationModel.exists({ ninHash, user: { $ne: user._id } })) throw ninInUse();
 
-    // Counted before the call, so concurrent requests can't get past the limit.
-    const counted = await KycVerificationModel.updateOne(
-      { _id: kyc._id, ninLookups: { $lt: env.KYC_MAX_NIN_LOOKUPS } },
-      { $inc: { ninLookups: 1 } },
-    ).exec();
-    if (counted.modifiedCount === 0) {
-      throw new AppError(
-        'You have tried too many NINs. Contact support to continue',
-        HttpStatus.TOO_MANY_REQUESTS,
-        'NIN_LOOKUP_LIMIT',
-      );
-    }
-    kyc.ninLookups += 1;
-
-    const identity = await dojahApi.lookupNin(nin);
+    const identity = await countedLookup(kyc, 'ninLookups', env.KYC_MAX_NIN_LOOKUPS, () =>
+      dojahApi.lookupNin(nin),
+    );
 
     kyc.set({
       ninEncrypted: encrypt(nin),
@@ -245,28 +332,34 @@ export const kycService = {
 
   /** Step 2. The customer confirms the NIN's details and adds what it doesn't have. */
   async saveDetails(userId: string, body: DetailsBody) {
-    const { user, kyc } = await loadForChange(userId);
+    const { user, kyc } = await loadForChange(userId, 'personal');
     if (!kyc.ninVerifiedAt || !kyc.identity) {
       throw AppError.conflict('Verify your NIN first', 'NIN_NOT_VERIFIED');
     }
 
     const gender = kyc.identity.gender ?? body.gender;
     const dateOfBirth = kyc.identity.dateOfBirth ?? body.dateOfBirth;
+    const phone = body.phone ?? kyc.identity.phone ?? user.phone;
     const missing = [
       !gender && { path: 'body.gender', message: 'Gender is required' },
       !dateOfBirth && { path: 'body.dateOfBirth', message: 'Date of birth is required' },
+      !phone && { path: 'body.phone', message: 'Phone is required' },
     ].filter((detail): detail is { path: string; message: string } => !!detail);
-    if (missing.length > 0 || !gender || !dateOfBirth) throw AppError.validation(missing);
+    if (missing.length > 0 || !gender || !dateOfBirth || !phone) throw AppError.validation(missing);
 
     if (ageOn(dateOfBirth, new Date()) < MIN_AGE_YEARS) {
       throw AppError.forbidden(`You must be at least ${MIN_AGE_YEARS} years old`, 'UNDERAGE');
     }
 
     kyc.details = {
-      phone: body.phone,
+      phone,
       gender,
       dateOfBirth,
-      address: { ...body.address, line2: body.address.line2 ?? null },
+      address: {
+        ...body.address,
+        line2: body.address.line2 ?? null,
+        lga: body.address.lga ?? null,
+      },
       occupation: body.occupation ?? null,
     };
     kyc.detailsCompletedAt = new Date();
@@ -275,7 +368,7 @@ export const kycService = {
     // What the customer confirmed becomes their profile, with their legal name from the NIN.
     user.set({
       name: legalName(kyc) ?? user.name,
-      phone: body.phone,
+      phone,
       gender,
       dateOfBirth,
       address: kyc.details.address,
@@ -290,33 +383,40 @@ export const kycService = {
    * Runs before an upload is stored, so a file that would be refused never reaches storage.
    * Throws the same errors that the upload itself would.
    */
-  async assertCanUpload(userId: string): Promise<void> {
-    const { kyc } = await loadForChange(userId);
-    if (!kyc.detailsCompletedAt) {
-      throw AppError.conflict('Confirm your personal details first', 'DETAILS_REQUIRED');
+  async assertCanUpload(userId: string, kind: KycDocumentKind): Promise<void> {
+    const flow =
+      kind === 'selfie' ? 'personal' : CORPORATE_KINDS.includes(kind) ? 'corporate' : undefined;
+    const { user, kyc } = await loadForChange(userId, flow);
+    const ready = isCorporate(user) ? kyc.business?.detailsCompletedAt : kyc.detailsCompletedAt;
+    if (!ready) {
+      throw AppError.conflict(
+        isCorporate(user)
+          ? 'Confirm your company details first'
+          : 'Confirm your personal details first',
+        'DETAILS_REQUIRED',
+      );
     }
   },
 
   /**
-   * Step 3. Stores a passport photograph or utility bill. The passport photograph also becomes the
-   * customer's avatar. A replaced file is deleted, unless it's still the avatar.
+   * Step 3. Stores a selfie or utility bill. The selfie also becomes the customer's avatar. A
+   * replaced file is deleted, unless it's still the avatar.
    */
   async saveDocument(
     userId: string,
     kind: KycDocumentKind,
     file: { url: string; mimetype: string },
   ) {
-    await this.assertCanUpload(userId);
+    await this.assertCanUpload(userId, kind);
     const kyc = (await findForUser(userId)) as KycDocument;
 
     const previous = kyc[kind]?.url ?? null;
     kyc[kind] = { url: file.url, mimeType: file.mimetype, uploadedAt: new Date() };
     await kyc.save();
 
-    const user =
-      kind === 'passportPhoto'
-        ? await userService.replaceAvatar(userId, file.url)
-        : await userService.findById(userId);
+    const user = AVATAR_KINDS.includes(kind)
+      ? await userService.replaceAvatar(userId, file.url)
+      : await userService.findById(userId);
 
     if (previous && previous !== file.url && previous !== user.avatar) {
       await cloudinaryStorage.remove(previous);
@@ -324,7 +424,129 @@ export const kycService = {
     return customerView(kyc, user);
   },
 
-  /** Step 4. Hands everything to a reviewer. Nothing can change until they decide. */
+  async lookupBusiness(userId: string, { companyType, registrationNumber }: BusinessLookupBody) {
+    if (!env.DOJAH_ENABLED) throw dojahDisabled();
+    const { user, kyc } = await loadForChange(userId, 'corporate');
+    if (
+      kyc.business?.companyType === companyType &&
+      kyc.business.registrationNumber === registrationNumber
+    ) {
+      return customerView(kyc, user);
+    }
+
+    const company = await countedLookup(kyc, 'businessLookups', env.KYC_MAX_BUSINESS_LOOKUPS, () =>
+      dojahApi.lookupCompany(companyType, registrationNumber),
+    );
+    if (company.status && !/^active$/i.test(company.status)) {
+      throw AppError.conflict(
+        'This company isn’t active on the CAC register, so it can’t be verified yet',
+        'COMPANY_INACTIVE',
+      );
+    }
+    const tin = await dojahApi.lookupTin(companyType, registrationNumber);
+
+    kyc.set({
+      business: {
+        companyType,
+        registrationNumber,
+        companyName: company.companyName,
+        registeredOn: company.registeredOn,
+        registeredAddress:
+          [company.address, company.city, company.lga, company.state].filter(Boolean).join(', ') ||
+          null,
+        affiliates: company.affiliates,
+        tin,
+        tinFromRegistry: !!tin,
+        email: company.email,
+        phone: null,
+        operatingAddress: null,
+        verifiedAt: new Date(),
+        detailsCompletedAt: null,
+      },
+      signatory: null,
+      signatoryIdEncrypted: null,
+      payout: null,
+    });
+    await kyc.save();
+    logger.info({ userId }, 'Customer verified their company');
+    return customerView(kyc, user);
+  },
+
+  async saveBusinessDetails(userId: string, body: BusinessDetailsBody) {
+    const { user, kyc } = await loadForChange(userId, 'corporate');
+    const business = kyc.business;
+    if (!business) throw AppError.conflict('Find your company first', 'COMPANY_NOT_VERIFIED');
+
+    const tin = business.tinFromRegistry ? business.tin : (body.tin ?? null);
+    if (!tin) throw AppError.validation([{ path: 'body.tin', message: 'TIN is required' }]);
+
+    kyc.set({
+      'business.tin': tin,
+      'business.email': body.email,
+      'business.phone': body.phone,
+      'business.operatingAddress': body.operatingAddress,
+      'business.detailsCompletedAt': new Date(),
+    });
+    await kyc.save();
+    return customerView(kyc, user);
+  },
+
+  async verifySignatory(userId: string, { fullName: name, idType, idNumber }: SignatoryBody) {
+    if (!env.DOJAH_ENABLED) throw dojahDisabled();
+    const { user, kyc } = await loadForChange(userId, 'corporate');
+    if (!kyc.business?.detailsCompletedAt) {
+      throw AppError.conflict('Confirm your company details first', 'DETAILS_REQUIRED');
+    }
+    const affiliate = kyc.business.affiliates.find((person) => samePerson(person.fullName, name));
+
+    const identity = await countedLookup(
+      kyc,
+      'businessLookups',
+      env.KYC_MAX_BUSINESS_LOOKUPS,
+      () => (idType === 'nin' ? dojahApi.lookupNin(idNumber) : dojahApi.lookupBvn(idNumber)),
+    );
+    const nameOnId = fullName(identity);
+    const claimedName = affiliate?.fullName ?? name;
+    if (!samePerson(claimedName, nameOnId)) {
+      throw AppError.badRequest(
+        `The name on this ${idType.toUpperCase()} doesn’t match ${claimedName}. Check the number, or enter your name as it appears on your ID`,
+        'ID_NAME_MISMATCH',
+      );
+    }
+
+    kyc.set({
+      signatory: {
+        fullName: claimedName,
+        role: affiliate?.role ?? 'AUTHORISED SIGNATORY',
+        onCacRecord: !!affiliate,
+        idType,
+        idLast4: idNumber.slice(-4),
+        verifiedName: nameOnId.toUpperCase(),
+        verifiedAt: new Date(),
+      },
+      signatoryIdEncrypted: encrypt(idNumber),
+    });
+    await kyc.save();
+    return customerView(kyc, user);
+  },
+
+  async savePayout(userId: string, { bankCode, bankName, accountNumber }: PayoutBody) {
+    const { user, kyc } = await loadForChange(userId, 'corporate');
+    if (!kyc.business) throw AppError.conflict('Find your company first', 'COMPANY_NOT_VERIFIED');
+
+    const accountName = await dojahApi.resolveAccount(accountNumber, bankCode);
+    if (!sameCompany(accountName, kyc.business.companyName)) {
+      throw AppError.badRequest(
+        `This account belongs to ${accountName}. Payouts can only go to an account in the company’s name`,
+        'ACCOUNT_NAME_MISMATCH',
+      );
+    }
+
+    kyc.payout = { bankCode, bankName, accountNumber, accountName, verifiedAt: new Date() };
+    await kyc.save();
+    return customerView(kyc, user);
+  },
+
   async submit(userId: string) {
     const { user, kyc } = await loadForChange(userId);
     const step = nextStep(kyc, user);

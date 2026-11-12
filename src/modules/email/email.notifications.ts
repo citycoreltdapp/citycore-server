@@ -1,5 +1,6 @@
 import { env } from '@/config/env';
 import { logger } from '@/config/logger';
+import type { EmailCodePurpose } from '@/modules/auth/emailCode.model';
 import { emailCodeService } from '@/modules/auth/emailCode.service';
 import { UserModel, type IUser } from '@/modules/user/user.model';
 import { emailService } from './email.service';
@@ -56,7 +57,7 @@ const codeExpiry = () => new Date(Date.now() + env.EMAIL_CODE_TTL_MINUTES * 60 *
 
 const sendCode = async (
   user: Recipient,
-  purpose: 'verify_email' | 'reset_password',
+  purpose: EmailCodePurpose,
   template: (code: string, ttlMinutes: number) => EmailTemplate,
 ) => {
   const code = await emailCodeService.issue(String(user.id ?? user._id), user.email, purpose);
@@ -73,6 +74,9 @@ export const emailNotifications = {
   ),
   passwordResetCode: safely('passwordResetCode', (user: Recipient) =>
     sendCode(user, 'reset_password', emailTemplates.passwordResetCode),
+  ),
+  signInCode: safely('signInCode', (user: Recipient) =>
+    sendCode(user, 'sign_in', emailTemplates.signInCode),
   ),
   welcome: safely('welcome', (user: Recipient) => send(user, emailTemplates.welcome(user.name))),
   accountCreatedByStaff: safely('accountCreatedByStaff', (user: Recipient) =>

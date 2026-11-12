@@ -6,18 +6,23 @@ import { currentUser } from '@/middlewares/auth';
 import { requireStoredFile } from '@/middlewares/upload';
 import {
   approveBodySchema,
+  businessDetailsBodySchema,
+  businessLookupBodySchema,
   detailsBodySchema,
   listVerificationsQuerySchema,
   ninBodySchema,
+  payoutBodySchema,
   rejectBodySchema,
+  signatoryBodySchema,
 } from './kyc.schemas';
 import { kycService, type KycDocumentKind } from './kyc.service';
 
-/** Checks the upload is allowed before the file is received, so nothing refused gets stored. */
-export const kycUploadGuard: RequestHandler = async (req, _res, next) => {
-  await kycService.assertCanUpload(currentUser(req).id);
-  next();
-};
+export const kycUploadGuard =
+  (kind: KycDocumentKind): RequestHandler =>
+  async (req, _res, next) => {
+    await kycService.assertCanUpload(currentUser(req).id, kind);
+    next();
+  };
 
 const uploadDocument = (kind: KycDocumentKind, message: string) =>
   controller({}, async (req, res) => {
@@ -38,8 +43,26 @@ export const kycController = {
     ok(res, await kycService.saveDetails(currentUser(req).id, req.body), 'Details saved');
   }),
 
-  uploadPassportPhoto: uploadDocument('passportPhoto', 'Passport photograph uploaded'),
+  uploadSelfie: uploadDocument('selfie', 'Selfie uploaded'),
   uploadUtilityBill: uploadDocument('utilityBill', 'Utility bill uploaded'),
+  uploadAuthorisationLetter: uploadDocument('authorisationLetter', 'Authorisation letter uploaded'),
+  uploadCompanyLogo: uploadDocument('companyLogo', 'Company logo uploaded'),
+
+  lookupBusiness: controller({ body: businessLookupBodySchema }, async (req, res) => {
+    ok(res, await kycService.lookupBusiness(currentUser(req).id, req.body), 'Company found');
+  }),
+
+  saveBusinessDetails: controller({ body: businessDetailsBodySchema }, async (req, res) => {
+    ok(res, await kycService.saveBusinessDetails(currentUser(req).id, req.body), 'Details saved');
+  }),
+
+  verifySignatory: controller({ body: signatoryBodySchema }, async (req, res) => {
+    ok(res, await kycService.verifySignatory(currentUser(req).id, req.body), 'Identity verified');
+  }),
+
+  savePayout: controller({ body: payoutBodySchema }, async (req, res) => {
+    ok(res, await kycService.savePayout(currentUser(req).id, req.body), 'Payout account saved');
+  }),
 
   submit: controller({}, async (req, res) => {
     ok(

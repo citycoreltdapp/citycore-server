@@ -92,7 +92,23 @@ export const authController = {
   }),
 
   login: controller({ body: loginBodySchema }, async (req, res) => {
-    sendSession(res, await authService.login(req.body, getClientInfo(req)));
+    const result = await authService.login(req.body, getClientInfo(req));
+    if ('verificationRequired' in result) ok(res, result, 'We sent a sign-in code to your email');
+    else sendSession(res, result);
+  }),
+
+  verifyLogin: controller({ body: emailCodeBodySchema }, async (req, res) => {
+    const session = await authService.verifyLogin(
+      req.body.email,
+      req.body.code,
+      getClientInfo(req),
+    );
+    sendSession(res, session, ok, 'Signed in');
+  }),
+
+  resendLoginCode: controller({ body: emailBodySchema }, async (req, res) => {
+    await authService.resendLoginCode(req.body.email);
+    ok(res, undefined, CODE_SENT_MESSAGE);
   }),
 
   google: controller({ body: googleSignInBodySchema }, async (req, res) => {

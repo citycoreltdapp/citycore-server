@@ -67,7 +67,7 @@ const saveDetails = (auth: string, body: object = { phone: '+2348099999999', add
 
 const uploadPassport = (auth: string) =>
   request(app)
-    .put(`${API}/passport-photo`)
+    .put(`${API}/selfie`)
     .set('Authorization', auth)
     .attach('file', PNG, { filename: 'me.png', contentType: 'image/png' });
 
@@ -140,7 +140,7 @@ describe('customer KYC', () => {
 
     expect(res.status).toBe(200);
     expect(dojah.lookups).toEqual([
-      { nin: NIN, appId: 'test-app-id', authorization: 'test_sk_fake' },
+      { path: '/api/v1/kyc/nin', nin: NIN, appId: 'test-app-id', authorization: 'test_sk_fake' },
     ]);
     expect(res.body.data).toMatchObject({
       status: 'draft',
@@ -213,6 +213,7 @@ describe('customer KYC', () => {
     const res = await verifyNin(auth);
     expect(res.status).toBe(502);
     expect(res.body.code).toBe('IDENTITY_PROVIDER_UNAVAILABLE');
+    expect((await state(auth)).nin.lookupsRemaining).toBe(3);
   });
 
   it('saves details, takes the legal name from the NIN and updates the profile', async () => {
@@ -271,7 +272,7 @@ describe('customer KYC', () => {
     }).expect(200);
   });
 
-  it('uploads a passport photograph, which becomes the avatar, and a utility bill', async () => {
+  it('uploads a selfie, which becomes the avatar, and a utility bill', async () => {
     const { auth, id } = await signIn('ada@example.com');
     await verifyNin(auth).expect(200);
 
@@ -283,7 +284,7 @@ describe('customer KYC', () => {
     await saveDetails(auth).expect(200);
     const photo = await uploadPassport(auth);
     expect(photo.status).toBe(200);
-    const photoUrl = photo.body.data.documents.passportPhoto.url as string;
+    const photoUrl = photo.body.data.documents.selfie.url as string;
     expect(cloudinary.files).toContain(photoUrl);
     expect((await UserModel.findById(id).lean())?.avatar).toBe(photoUrl);
 
@@ -292,17 +293,17 @@ describe('customer KYC', () => {
     expect(bill.body.data.documents.utilityBill.mimeType).toBe('application/pdf');
     expect(bill.body.data.nextStep).toBe('submit');
 
-    // A new passport photograph replaces the old one, and the old file goes.
+    // A new selfie replaces the old one, and the old file goes.
     const again = await uploadPassport(auth);
-    const newUrl = again.body.data.documents.passportPhoto.url as string;
+    const newUrl = again.body.data.documents.selfie.url as string;
     expect(newUrl).not.toBe(photoUrl);
     expect(cloudinary.files).not.toContain(photoUrl);
     expect((await UserModel.findById(id).lean())?.avatar).toBe(newUrl);
   });
 
-  it('keeps the passport photograph when the customer changes their avatar', async () => {
+  it('keeps the selfie when the customer changes their avatar', async () => {
     const { auth } = await submitted();
-    const before = (await state(auth)).documents.passportPhoto.url as string;
+    const before = (await state(auth)).documents.selfie.url as string;
 
     await request(app)
       .delete('/api/v1/users/me/avatar')
@@ -375,7 +376,7 @@ describe('staff review', () => {
       .set('Authorization', admin.auth);
     expect(one.status).toBe(200);
     expect(one.body.data.nin).toBe(NIN);
-    expect(one.body.data.passportPhoto.url).toBeTruthy();
+    expect(one.body.data.selfie.url).toBeTruthy();
   });
 
   it('approves, which completes KYC for the customer', async () => {
@@ -468,5 +469,212 @@ describe('staff review', () => {
       .send({});
     expect(self.status).toBe(403);
     expect(self.body.code).toBe('SELF_REVIEW');
+  });
+});
+
+describe('corporate KYC', () => {
+  const COMPANY = {
+    company_name: 'HARBOURLINE PROPERTIES LIMITED',
+    rc_number: '1234567',
+    address: '14 Adeola Odeku Street',
+    city: 'Victoria Island',
+    lga: 'Eti-Osa',
+    state: 'Lagos',
+    email: 'info@harbourline.ng',
+    type_of_company: 'COMPANY',
+    date_of_registration: '2019-03-12T08:00:06.224+00:00',
+    affiliates: [
+      { first_name: 'ADA', last_name: 'LOVELACE', affiliate_type: 'DIRECTOR' },
+      { first_name: 'TUNDE', last_name: 'BAKARE', affiliate_type: 'SHAREHOLDER' },
+    ],
+  };
+  const BVN = '22212345678';
+  const details = {
+    email: 'finance@harbourline.ng',
+    phone: '+2348023456789',
+    operatingAddress: null,
+  };
+
+  const corporate = () => signIn('corp@example.com', { accountType: 'corporate' });
+  const lookup = (auth: string, registrationNumber = 'RC 1234567') =>
+    request(app)
+      .post(`${API}/business`)
+      .set('Authorization', auth)
+      .send({ companyType: 'limited', registrationNumber });
+  const signatory = (auth: string, body: object) =>
+    request(app).post(`${API}/business/signatory`).set('Authorization', auth).send(body);
+  const payout = (auth: string, accountNumber: string) =>
+    request(app)
+      .put(`${API}/business/payout`)
+      .set('Authorization', auth)
+      .send({ bankCode: '058', bankName: 'Guaranty Trust Bank', accountNumber });
+
+  beforeEach(() => {
+    dojah.companies.set('COMPANY:1234567', COMPANY);
+    dojah.tins.set('COMPANY:1234567', '23456789-0001');
+    dojah.bvns.set(BVN, { first_name: 'CHIOMA', last_name: 'EZE' });
+    dojah.accounts.set('058:0123456789', 'HARBOURLINE PROPERTIES LTD');
+    dojah.accounts.set('058:0000000001', 'ADA LOVELACE');
+  });
+
+  it('verifies a company, its signatory and payout account, then submits', async () => {
+    const { auth } = await corporate();
+    expect((await state(auth)).nextStep).toBe('verify_company');
+
+    const found = await lookup(auth).expect(200);
+    expect(found.body.data).toMatchObject({
+      nextStep: 'company_details',
+      business: {
+        companyName: 'Harbourline Properties Limited',
+        registrationNumber: '1234567',
+        registeredAddress: '14 Adeola Odeku Street, Victoria Island, Eti-Osa, Lagos',
+        tin: '23456789-0001',
+        tinFromRegistry: true,
+        affiliates: [
+          { fullName: 'Ada Lovelace', role: 'DIRECTOR' },
+          { fullName: 'Tunde Bakare', role: 'SHAREHOLDER' },
+        ],
+      },
+    });
+
+    await request(app)
+      .put(`${API}/business/details`)
+      .set('Authorization', auth)
+      .send(details)
+      .expect(200);
+    await uploadBill(auth).expect(200);
+
+    const mismatch = await signatory(auth, {
+      fullName: 'Ada Lovelace',
+      idType: 'bvn',
+      idNumber: BVN,
+    });
+    expect(mismatch.status).toBe(400);
+    expect(mismatch.body.code).toBe('ID_NAME_MISMATCH');
+
+    const verified = await signatory(auth, {
+      fullName: 'Ada Lovelace',
+      idType: 'nin',
+      idNumber: NIN,
+    });
+    expect(verified.status).toBe(200);
+    expect(verified.body.data.signatory).toMatchObject({ idType: 'nin', idLast4: '6789' });
+
+    const wrongName = await payout(auth, '0000000001');
+    expect(wrongName.body.code).toBe('ACCOUNT_NAME_MISMATCH');
+    await payout(auth, '0123456789').expect(200);
+
+    const done = await request(app).post(`${API}/submit`).set('Authorization', auth).expect(200);
+    expect(done.body.data.status).toBe('in_review');
+  });
+
+  it('lets someone not on the CAC record sign, with an authorisation letter', async () => {
+    const { auth } = await corporate();
+    await lookup(auth).expect(200);
+    await request(app)
+      .put(`${API}/business/details`)
+      .set('Authorization', auth)
+      .send(details)
+      .expect(200);
+    await uploadBill(auth).expect(200);
+
+    const res = await signatory(auth, { fullName: 'Chioma Eze', idType: 'bvn', idNumber: BVN });
+    expect(res.status).toBe(200);
+    expect(res.body.data.signatory).toMatchObject({
+      fullName: 'Chioma Eze',
+      onCacRecord: false,
+      role: 'AUTHORISED SIGNATORY',
+    });
+    expect(res.body.data.nextStep).toBe('upload_authorisation');
+
+    const letter = await request(app)
+      .put(`${API}/authorisation-letter`)
+      .set('Authorization', auth)
+      .attach('file', PDF, { filename: 'letter.pdf', contentType: 'application/pdf' })
+      .expect(200);
+    expect(letter.body.data.nextStep).toBe('submit');
+  });
+
+  it('accepts a signatory when the CAC record lists nobody', async () => {
+    dojah.companies.set('COMPANY:1234567', { ...COMPANY, affiliates: [] });
+    const { auth } = await corporate();
+    await lookup(auth).expect(200);
+    await request(app)
+      .put(`${API}/business/details`)
+      .set('Authorization', auth)
+      .send(details)
+      .expect(200);
+    await uploadBill(auth).expect(200);
+    const res = await signatory(auth, { fullName: 'Ada Lovelace', idType: 'nin', idNumber: NIN });
+    expect(res.status).toBe(200);
+    expect(res.body.data.signatory.onCacRecord).toBe(false);
+  });
+
+  it('submits without a payout account, which can be added later', async () => {
+    const { auth } = await corporate();
+    await lookup(auth).expect(200);
+    await request(app)
+      .put(`${API}/business/details`)
+      .set('Authorization', auth)
+      .send(details)
+      .expect(200);
+    await uploadBill(auth).expect(200);
+    const verified = await signatory(auth, {
+      fullName: 'Ada Lovelace',
+      idType: 'nin',
+      idNumber: NIN,
+    }).expect(200);
+    expect(verified.body.data.nextStep).toBe('submit');
+    const done = await request(app).post(`${API}/submit`).set('Authorization', auth).expect(200);
+    expect(done.body.data.payout).toBeNull();
+  });
+
+  it('takes an optional company logo, which becomes the avatar', async () => {
+    const { auth } = await corporate();
+    await lookup(auth).expect(200);
+    await request(app)
+      .put(`${API}/business/details`)
+      .set('Authorization', auth)
+      .send(details)
+      .expect(200);
+    const res = await request(app)
+      .put(`${API}/company-logo`)
+      .set('Authorization', auth)
+      .attach('file', PNG, { filename: 'logo.png', contentType: 'image/png' })
+      .expect(200);
+    expect(res.body.data.documents.companyLogo.url).toBeTruthy();
+    expect(res.body.data.nextStep).toBe('upload_documents');
+    const me = await request(app).get('/api/v1/users/me').set('Authorization', auth).expect(200);
+    expect(me.body.data.avatar).toBe(res.body.data.documents.companyLogo.url);
+  });
+
+  it('asks for a TIN when the registry has none', async () => {
+    dojah.tins.clear();
+    const { auth } = await corporate();
+    await lookup(auth).expect(200);
+    const res = await request(app)
+      .put(`${API}/business/details`)
+      .set('Authorization', auth)
+      .send(details);
+    expect(res.status).toBe(422);
+    await request(app)
+      .put(`${API}/business/details`)
+      .set('Authorization', auth)
+      .send({ ...details, tin: '12345678-0001' })
+      .expect(200);
+  });
+
+  it('keeps each account type to its own flow', async () => {
+    const company = await corporate();
+    expect((await verifyNin(company.auth)).body.code).toBe('CORPORATE_ACCOUNT');
+    const person = await signIn('person@example.com');
+    expect((await lookup(person.auth)).body.code).toBe('NOT_CORPORATE');
+  });
+
+  it('reports an unknown company and an empty Dojah wallet differently', async () => {
+    const { auth } = await corporate();
+    expect((await lookup(auth, '7654321')).body.code).toBe('COMPANY_NOT_FOUND');
+    dojah.outage = { status: 402, body: { error: 'Insufficient wallet balance' } };
+    expect((await lookup(auth, '1234567')).status).toBe(502);
   });
 });

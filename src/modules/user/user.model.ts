@@ -9,12 +9,14 @@ export interface IAddress {
   line1: string;
   line2?: string | null;
   city: string;
+  lga?: string | null;
   state: string;
   /** ISO 3166-1 alpha-2, such as NG. */
   country: string;
   postalCode?: string | null;
 }
 
+export const ACCOUNT_TYPES = ['personal', 'corporate', 'esp', 'staff'] as const;
 export const GENDERS = ['male', 'female', 'other', 'prefer_not_to_say'] as const;
 export const MARITAL_STATUSES = ['single', 'married', 'divorced', 'widowed', 'separated'] as const;
 
@@ -26,7 +28,6 @@ export interface INextOfKin {
   address?: string | null;
 }
 
-/** Optional here so an update can send only some. The schema always fills in the rest. */
 export interface IPreferences {
   language?: string;
   timezone?: string;
@@ -38,57 +39,45 @@ export interface IPreferences {
 export interface IUser {
   name: string;
   email: string;
-  /** Whether its owner has proved they receive mail there. Nothing is blocked while it's false. */
   emailVerified: boolean;
-  /** Absent for an account made with Google, until its owner sets one: see `hasPassword`. */
   password: string;
   hasPassword: boolean;
-  /** Google's id for the account, once it's linked. */
   googleId: string | null;
-  /** What this person shares to refer others. Older accounts get one when it's first needed. */
   referralCode: string | null;
-  /** True after a Google signup with no code, until the customer adds one or skips. */
   referralPromptPending: boolean;
-  /** A built-in role or the key of a custom one. Controllers check that it exists. */
+  accountType: (typeof ACCOUNT_TYPES)[number];
+  termsAcceptedAt: Date | null;
   role: string;
   avatar: string | null;
-  /** E.164, such as +2348012345678. Not verified, and not unique: people share numbers. */
   phone: string | null;
   alternatePhone: string | null;
   dateOfBirth: Date | null;
   gender: (typeof GENDERS)[number] | null;
   maritalStatus: (typeof MARITAL_STATUSES)[number] | null;
-  /** ISO 3166-1 alpha-2, such as NG. */
   nationality: string | null;
   address: IAddress | null;
   occupation: string | null;
   employer: string | null;
   nextOfKin: INextOfKin | null;
   preferences: IPreferences;
-  /** For staff, shown on their profile. */
   jobTitle: string | null;
   department: string | null;
-  /** Set by whoever manages the account, never by its owner. */
   employeeId: string | null;
-  /**
-   * Whether Symplus says this customer has passed KYC. Only the Symplus sync sets it, and no request
-   * schema accepts it. Being false doesn't stop anyone signing in or using the dashboard.
-   */
   kycCompleted: boolean;
   kycCompletedAt: Date | null;
   isActive: boolean;
-  /** Incrementing this invalidates every access token already issued to the user. */
   tokenVersion: number;
   lastLoginAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
 
-const addressSchema = new Schema<IAddress>(
+export const addressSchema = new Schema<IAddress>(
   {
     line1: { type: String, required: true, trim: true },
     line2: { type: String, default: null, trim: true },
     city: { type: String, required: true, trim: true },
+    lga: { type: String, default: null, trim: true },
     state: { type: String, required: true, trim: true },
     country: { type: String, required: true, uppercase: true },
     postalCode: { type: String, default: null, trim: true },
@@ -134,6 +123,8 @@ const userSchema = createSchema<IUser>(
     googleId: { type: String, default: null },
     referralCode: { type: String, default: null, uppercase: true, trim: true },
     referralPromptPending: { type: Boolean, default: false },
+    accountType: { type: String, enum: ACCOUNT_TYPES, default: 'personal' },
+    termsAcceptedAt: { type: Date, default: null },
     role: { type: String, default: Role.USER, index: true },
     avatar: { type: String, default: null },
     phone: { type: String, default: null, index: true },

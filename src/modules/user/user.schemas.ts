@@ -36,6 +36,7 @@ export const addressSchema = z.object({
   line1: z.string().trim().min(1).max(200),
   line2: z.string().trim().max(200).nullable().optional(),
   city: z.string().trim().min(1).max(100),
+  lga: z.string().trim().max(100).nullable().optional(),
   state: z.string().trim().min(1).max(100),
   country: countrySchema,
   postalCode: z.string().trim().max(20).nullable().optional(),

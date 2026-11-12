@@ -117,6 +117,7 @@ const envSchema = z
     EMAIL_SEND_INTERVAL_MS: z.coerce.number().int().min(0).default(600),
     EMAIL_BIRTHDAY_CHECK_MINUTES: z.coerce.number().positive().default(15),
     EMAIL_CODE_TTL_MINUTES: z.coerce.number().int().positive().default(10),
+    AUTH_LOGIN_CODE: z.stringbool().default(true),
     EMAIL_SEND_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(30),
 
     // Dojah verifies a customer's NIN during KYC. While this is off, the NIN step answers 503.
@@ -128,6 +129,7 @@ const envSchema = z
     DOJAH_TIMEOUT_MS: z.coerce.number().int().positive().default(15_000),
     // Each NIN lookup is billed, so a customer gets this many before staff must step in.
     KYC_MAX_NIN_LOOKUPS: z.coerce.number().int().positive().default(5),
+    KYC_MAX_BUSINESS_LOOKUPS: z.coerce.number().int().positive().default(8),
     KYC_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(30),
 
     SYMPLUS_ENABLED: z.stringbool().default(false),

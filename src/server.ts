@@ -16,6 +16,7 @@ import { startWalletWorker, stopWalletWorker } from './modules/wallet/wallet.wor
 import { startEmailWorkers, stopEmailWorkers } from './modules/email/email.worker';
 import { startSymplusWorker, stopSymplusWorker } from './modules/symplus/symplus.worker';
 
+
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 
 let server: Server | undefined;

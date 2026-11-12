@@ -1,7 +1,7 @@
 import { model, Schema, type Types } from 'mongoose';
 import { createSchema } from '@/core/database/createSchema';
 
-export const EMAIL_CODE_PURPOSES = ['verify_email', 'reset_password'] as const;
+export const EMAIL_CODE_PURPOSES = ['verify_email', 'reset_password', 'sign_in'] as const;
 export type EmailCodePurpose = (typeof EMAIL_CODE_PURPOSES)[number];
 
 /** The latest code emailed to an account for one purpose. Requesting another replaces it. */

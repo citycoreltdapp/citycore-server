@@ -2,6 +2,7 @@ import { createHmac } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import { createApp } from '@/app';
+import { signupBody } from './signup';
 import { connectDatabase, disconnectDatabase } from '@/config/database';
 import { env } from '@/config/env';
 import { SessionModel } from '@/modules/auth/session.model';
@@ -29,7 +30,7 @@ const paystack = new FakePaystack();
 const signUpWithoutKyc = async (email = 'ada@example.com') => {
   const res = await request(app)
     .post('/api/v1/auth/register')
-    .send({ name: 'Ada Lovelace', email, password: 'Passw0rd123' });
+    .send(signupBody({ name: 'Ada Lovelace', email, password: 'Passw0rd123' }));
   return {
     id: res.body.data.user.id as string,
     auth: `Bearer ${res.body.data.accessToken as string}`,

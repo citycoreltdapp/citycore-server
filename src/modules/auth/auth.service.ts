@@ -1,4 +1,5 @@
 import type { HydratedDocument } from 'mongoose';
+import { env } from '@/config/env';
 import { Role } from '@/constants/roles';
 import { AppError } from '@/core/errors/AppError';
 import { googleApi } from '@/integrations/google/google.client';
@@ -16,6 +17,7 @@ import type {
   RegisterBody,
   ResetPasswordBody,
 } from './auth.schemas';
+import { EmailCodeModel } from './emailCode.model';
 import { emailCodeService, invalidCode } from './emailCode.service';
 import { sessionService, type ClientInfo } from './session.service';
 
@@ -55,11 +57,20 @@ const nameFromEmail = (email: string): string => {
 };
 
 export const authService = {
-  async register({ referralCode, name, ...data }: RegisterBody, client: ClientInfo) {
+  async register(
+    { referrer: referralCode, name, email, password, accountType }: RegisterBody,
+    client: ClientInfo,
+  ) {
     // Checked first, so that a mistyped code doesn't leave an account behind without its referrer.
     const referral = referralCode ? await referralService.resolveCode(referralCode) : null;
 
-    const user = await userService.create({ ...data, name: name ?? nameFromEmail(data.email) });
+    const user = await userService.create({
+      email,
+      password,
+      accountType,
+      name: name ?? nameFromEmail(email),
+      termsAcceptedAt: new Date(),
+    });
     if (referral) {
       await referralService.link(referral.referrerId, user.id, referral.code, 'signup');
     }
@@ -164,10 +175,36 @@ export const authService = {
     if (!(await verifyPassword(password, user.password))) throw invalidCredentials();
     if (!user.isActive) throw AppError.forbidden('This account is disabled', 'ACCOUNT_DISABLED');
 
+    if (env.AUTH_LOGIN_CODE) {
+      await emailNotifications.signInCode(user);
+      return { verificationRequired: true as const, email: user.email };
+    }
+
     user.lastLoginAt = new Date();
     await user.save();
-
     return startSession(user, client);
+  },
+
+  async verifyLogin(email: string, code: string, client: ClientInfo) {
+    const user = await userService.findOne({ email, isActive: true });
+    if (!user) throw invalidCode();
+    await emailCodeService.check(String(user._id), user.email, 'sign_in', code, { consume: true });
+
+    user.lastLoginAt = new Date();
+    if (!user.emailVerified) user.emailVerified = true;
+    await user.save();
+    return startSession(user, client);
+  },
+
+  async resendLoginCode(email: string): Promise<void> {
+    const user = await userService.findOne({ email, isActive: true });
+    if (!user) return;
+    const pending = await EmailCodeModel.exists({
+      user: user._id,
+      purpose: 'sign_in',
+      expiresAt: { $gt: new Date() },
+    });
+    if (pending) await emailNotifications.signInCode(user);
   },
 
   async refresh(refreshToken: string, client: ClientInfo) {

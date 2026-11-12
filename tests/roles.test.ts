@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import { createApp } from '@/app';
+import { signupBody } from './signup';
 import { connectDatabase, disconnectDatabase } from '@/config/database';
 import { PERMISSIONS } from '@/constants/permissions';
 import { ROLES, Role } from '@/constants/roles';
@@ -272,7 +273,7 @@ describe('who can manage whom', () => {
     expect((await send(auth, 'patch', `/users/${otherId}`).send({ isActive: false })).status).toBe(
       200,
     );
-    const created = await send(auth, 'post', '/users').send({ ...newUser, role: 'super_admin' });
+    const created = await send(auth, 'post', '/users').send(signupBody({ ...newUser, role: 'super_admin' }));
     expect(created.status).toBe(201);
   });
 
@@ -300,7 +301,7 @@ describe('who can manage whom', () => {
   it('still ignores a role sent at registration', async () => {
     const res = await request(app)
       .post(`${API}/auth/register`)
-      .send({ ...newUser, role: 'super_admin' });
+      .send(signupBody({ ...newUser, role: 'super_admin' }));
     expect(res.body.data.user.role).toBe('user');
   });
 });

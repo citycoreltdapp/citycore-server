@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import { createApp } from '@/app';
+import { signupBody } from './signup';
 import { connectDatabase, disconnectDatabase } from '@/config/database';
 import { SessionModel } from '@/modules/auth/session.model';
 import { CustomerLinkModel } from '@/modules/symplus/customerLink.model';
@@ -36,7 +37,7 @@ const created = (reference: Record<string, string>) => ({
 const signUp = async () => {
   const res = await request(app)
     .post('/api/v1/auth/register')
-    .send({ name: 'Ada Lovelace', email: EMAIL, password: PASSWORD });
+    .send(signupBody({ name: 'Ada Lovelace', email: EMAIL, password: PASSWORD }));
   return {
     id: res.body.data.user.id as string,
     auth: `Bearer ${res.body.data.accessToken as string}`,
@@ -280,7 +281,7 @@ describe('who decides KYC is complete', () => {
   it('cannot be set by the user', async () => {
     const res = await request(app)
       .post('/api/v1/auth/register')
-      .send({ name: 'Ada Lovelace', email: EMAIL, password: PASSWORD, kycCompleted: true });
+      .send(signupBody({ name: 'Ada Lovelace', email: EMAIL, password: PASSWORD, kycCompleted: true }));
     expect(res.body.data.user.kycCompleted).toBe(false);
     const auth = `Bearer ${res.body.data.accessToken as string}`;
 

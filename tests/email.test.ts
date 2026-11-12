@@ -1,7 +1,9 @@
 import request from 'supertest';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '@/app';
+import { signupBody } from './signup';
 import { connectDatabase, disconnectDatabase } from '@/config/database';
+import { env } from '@/config/env';
 import { SessionModel } from '@/modules/auth/session.model';
 import { EmailCodeModel } from '@/modules/auth/emailCode.model';
 import { birthdayService } from '@/modules/email/birthday.service';
@@ -28,12 +30,16 @@ const signIn = async (role: string, overrides: object = {}) => {
     role,
     ...overrides,
   });
-  const res = await request(app).post(`${API}/auth/login`).send({ email, password: PASSWORD });
+  const res = await request(app)
+    .post(`${API}/auth/login`)
+    .send(signupBody({ email, password: PASSWORD }));
   return { id: user.id as string, email, auth: `Bearer ${res.body.data.accessToken as string}` };
 };
 
 const register = async (email: string) => {
-  const res = await request(app).post(`${API}/auth/register`).send({ email, password: PASSWORD });
+  const res = await request(app)
+    .post(`${API}/auth/register`)
+    .send(signupBody({ email, password: PASSWORD }));
   expect(res.status).toBe(201);
   return {
     id: res.body.data.user.id as string,
@@ -716,5 +722,62 @@ describe('birthdays', () => {
     expect(res.body.data.text).toBe('Hello Ada!');
     expect(res.body.data.subject).toBe('Happy birthday, Ada!');
     expect(await EmailLogModel.countDocuments()).toBe(0);
+  });
+});
+
+describe('sign-in code', () => {
+  const EMAIL = 'ada@example.com';
+  const login = () =>
+    request(app).post(`${API}/auth/login`).send({ email: EMAIL, password: PASSWORD });
+  const verify = (code: string) =>
+    request(app).post(`${API}/auth/login/verify`).send({ email: EMAIL, code });
+
+  beforeEach(() => {
+    env.AUTH_LOGIN_CODE = true;
+  });
+  afterEach(() => {
+    env.AUTH_LOGIN_CODE = false;
+  });
+
+  it('emails a code instead of signing in, and signs in once it is entered', async () => {
+    await addCustomer('Ada Lovelace', EMAIL, null, { emailVerified: false });
+
+    const res = await login().expect(200);
+    expect(res.body.data).toEqual({ verificationRequired: true, email: EMAIL });
+    expect(res.body.data.accessToken).toBeUndefined();
+    expect(res.headers['set-cookie']).toBeUndefined();
+
+    await flush();
+    const code = resend.codeFor(EMAIL);
+    expect((await verify(code === '000000' ? '000001' : '000000')).body.code).toBe('INVALID_CODE');
+
+    const done = await verify(code).expect(200);
+    expect(done.body.data.accessToken).toBeTruthy();
+    expect(done.headers['set-cookie']?.[0]).toContain('refreshToken=');
+    expect((await UserModel.findOne({ email: EMAIL }).orFail()).emailVerified).toBe(true);
+    await verify(code).expect(400);
+  });
+
+  it('still refuses a wrong password without sending a code', async () => {
+    await addCustomer('Ada Lovelace', EMAIL, null);
+    await request(app)
+      .post(`${API}/auth/login`)
+      .send({ email: EMAIL, password: 'WrongPass1' })
+      .expect(401);
+    await flush();
+    expect(resend.to(EMAIL)).toHaveLength(0);
+  });
+
+  it('resends only while a sign-in is waiting for its code', async () => {
+    await addCustomer('Ada Lovelace', EMAIL, null);
+    await request(app).post(`${API}/auth/login/resend`).send({ email: EMAIL }).expect(200);
+    await flush();
+    expect(resend.to(EMAIL)).toHaveLength(0);
+
+    await login().expect(200);
+    await EmailCodeModel.updateOne({ purpose: 'sign_in' }, { lastSentAt: new Date(0) });
+    await request(app).post(`${API}/auth/login/resend`).send({ email: EMAIL }).expect(200);
+    await flush();
+    expect(resend.to(EMAIL)).toHaveLength(2);
   });
 });

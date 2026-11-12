@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '@/app';
+import { signupBody } from './signup';
 import { connectDatabase, disconnectDatabase } from '@/config/database';
 import { errorHandler } from '@/middlewares/errorHandler';
 import { createRateLimiter } from '@/middlewares/rateLimiter';
@@ -17,10 +18,10 @@ const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0
 const app = createApp();
 const validUser = { name: 'Ada Lovelace', email: 'ada@example.com', password: 'Passw0rd123' };
 
-const register = (overrides: Partial<typeof validUser> = {}) =>
+const register = (overrides: object = {}) =>
   request(app)
     .post(`${API}/auth/register`)
-    .send({ ...validUser, ...overrides });
+    .send(signupBody({ ...validUser, ...overrides }));
 
 const refreshCookieOf = (res: request.Response): string => {
   const cookies = res.headers['set-cookie'] as unknown as string[];
@@ -119,8 +120,26 @@ describe('auth', () => {
   it('ignores a role sent during registration', async () => {
     const res = await request(app)
       .post(`${API}/auth/register`)
-      .send({ ...validUser, role: 'admin' });
+      .send(signupBody({ ...validUser, role: 'admin' }));
     expect(res.body.data.user.role).toBe('user');
+  });
+
+  it('stores the account type and when the terms were accepted, without granting staff access', async () => {
+    const res = await register({ accountType: 'staff' });
+    expect(res.status).toBe(201);
+    expect(res.body.data.user).toMatchObject({ accountType: 'staff', role: 'user' });
+    expect(res.body.data.user.termsAcceptedAt).toBeTruthy();
+  });
+
+  it.each([
+    ['unaccepted terms', { terms: false }, 'terms'],
+    ['a mismatched confirmation', { confirmPassword: 'Different123' }, 'confirmPassword'],
+    ['an unknown account type', { accountType: 'vip' }, 'accountType'],
+  ])('rejects %s', async (_label, overrides, field) => {
+    const res = await register(overrides);
+    expect(res.status).toBe(422);
+    expect(res.body.errors.map((error: { path: string }) => error.path)).toContain(`body.${field}`);
+    expect(await UserModel.countDocuments()).toBe(0);
   });
 
   it('reports every invalid field', async () => {

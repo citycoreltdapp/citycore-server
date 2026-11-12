@@ -20,6 +20,7 @@ export default defineConfig({
       REFERRAL_SIGNUP_URL: 'https://app.example.com/signup',
       RATE_LIMIT_MAX: '100000',
       AUTH_RATE_LIMIT_MAX: '100000',
+      AUTH_LOGIN_CODE: 'false',
       UPLOAD_RATE_LIMIT_MAX: '100000',
       HELPDESK_RATE_LIMIT_MAX: '100000',
       CLOUDINARY_URL:

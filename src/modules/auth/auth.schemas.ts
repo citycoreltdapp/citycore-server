@@ -1,14 +1,22 @@
 import { z } from 'zod';
 import { emailSchema, nameSchema, passwordSchema } from '@/core/validation/common.schemas';
 import { optionalReferralCodeSchema } from '@/modules/referral/referral.schemas';
+import { ACCOUNT_TYPES } from '@/modules/user/user.model';
 
-export const registerBodySchema = z.object({
-  /** Optional: the customer can add it to their profile later. */
-  name: nameSchema.optional(),
-  email: emailSchema,
-  password: passwordSchema,
-  referralCode: optionalReferralCodeSchema,
-});
+export const registerBodySchema = z
+  .object({
+    accountType: z.enum(ACCOUNT_TYPES, 'Choose an account type'),
+    name: nameSchema.optional(),
+    email: emailSchema,
+    password: passwordSchema,
+    confirmPassword: z.string().min(1, 'Confirm your password'),
+    referrer: optionalReferralCodeSchema,
+    terms: z.literal(true, 'You must accept the terms to continue'),
+  })
+  .refine((body) => body.password === body.confirmPassword, {
+    path: ['confirmPassword'],
+    message: 'Passwords do not match',
+  });
 
 const googleTokenSchema = z.string().trim().min(1, 'A Google token is required').max(4096);
 
@@ -23,7 +31,6 @@ export const setPasswordBodySchema = z.object({ newPassword: passwordSchema });
 
 export const loginBodySchema = z.object({
   email: emailSchema,
-  // Password rules aren't applied here, so older passwords keep working if the rules change.
   password: z.string().min(1, 'Password is required').max(200),
 });
 

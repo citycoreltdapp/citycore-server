@@ -4,28 +4,46 @@ import { HttpStatus } from '@/constants/http';
 import { AppError } from '@/core/errors/AppError';
 import { fetchWithTimeout, parseJsonBody } from '@/utils/http';
 
-/** What Dojah holds for a NIN, in our own shape. Any field Dojah leaves out is null. */
-export interface NinIdentity {
-  nin: string;
+export interface PersonIdentity {
   firstName: string | null;
   middleName: string | null;
   lastName: string | null;
   dateOfBirth: Date | null;
   gender: 'male' | 'female' | null;
-  /** E.164, such as +2348012345678. */
   phone: string | null;
 }
 
-/** The entity Dojah returns for GET /api/v1/kyc/nin. Only the fields we use. */
-interface DojahNinEntity {
-  nin?: string;
-  first_name?: string;
-  middle_name?: string;
-  last_name?: string;
-  date_of_birth?: string;
-  gender?: string;
-  phone_number?: string;
+export type NinIdentity = PersonIdentity & { nin: string };
+
+export const DOJAH_COMPANY_TYPES = {
+  limited: 'COMPANY',
+  businessName: 'BUSINESS_NAME',
+  trustees: 'INCORPORATED_TRUSTEES',
+  limitedPartnership: 'LIMITED_PARTNERSHIP',
+  llp: 'LIMITED_LIABILITY_PARTNERSHIP',
+} as const;
+
+export type CompanyType = keyof typeof DOJAH_COMPANY_TYPES;
+
+export interface CacAffiliate {
+  fullName: string;
+  role: string;
 }
+
+export interface CacCompany {
+  companyName: string;
+  registrationNumber: string;
+  registeredOn: Date | null;
+  address: string | null;
+  city: string | null;
+  lga: string | null;
+  state: string | null;
+  email: string | null;
+  status: string | null;
+  affiliates: CacAffiliate[];
+}
+
+type Entity = Record<string, unknown>;
 
 export const dojahDisabled = () =>
   new AppError(
@@ -48,6 +66,13 @@ const timedOut = () =>
     'IDENTITY_PROVIDER_TIMEOUT',
   );
 
+const badResponse = () =>
+  new AppError(
+    'Identity verification returned an unexpected response',
+    HttpStatus.BAD_GATEWAY,
+    'IDENTITY_PROVIDER_BAD_RESPONSE',
+  );
+
 export const ninNotFound = () =>
   AppError.badRequest('We could not find a record for that NIN', 'NIN_NOT_FOUND');
 
@@ -57,7 +82,6 @@ const clean = (value: unknown): string | null => {
   return trimmed === '' ? null : trimmed;
 };
 
-/** NIMC names come in capitals, so ADA LOVELACE becomes Ada Lovelace. */
 const titleCase = (value: unknown): string | null =>
   clean(value)
     ?.toLowerCase()
@@ -66,7 +90,6 @@ const titleCase = (value: unknown): string | null =>
       (_, start: string, letter: string) => start + letter.toUpperCase(),
     ) ?? null;
 
-/** Dojah sends YYYY-MM-DD, though some records come as DD-MM-YYYY. */
 const parseDate = (value: unknown): Date | null => {
   const text = clean(value);
   if (!text) return null;
@@ -82,14 +105,13 @@ const parseDate = (value: unknown): Date | null => {
   return Number.isNaN(date.getTime()) || date.getUTCDate() !== Number(day) ? null : date;
 };
 
-const parseGender = (value: unknown): NinIdentity['gender'] => {
+const parseGender = (value: unknown): PersonIdentity['gender'] => {
   const text = clean(value)?.toLowerCase();
   if (text === 'm' || text === 'male') return 'male';
   if (text === 'f' || text === 'female') return 'female';
   return null;
 };
 
-/** Nigerian numbers come as 08012345678 or 2348012345678. */
 const parsePhone = (value: unknown): string | null => {
   const digits = clean(value)?.replace(/\D/g, '');
   if (!digits) return null;
@@ -98,70 +120,149 @@ const parsePhone = (value: unknown): string | null => {
   return null;
 };
 
-export const dojahApi = {
-  /**
-   * Looks up a NIN with NIMC through Dojah. The photo Dojah also returns is dropped: it's large, and
-   * the passport photograph is what reviewers compare against.
-   */
-  async lookupNin(nin: string): Promise<NinIdentity> {
-    if (!env.DOJAH_ENABLED) throw dojahDisabled();
+const toIdentity = (entity: Entity, phone: unknown): PersonIdentity => ({
+  firstName: titleCase(entity.first_name),
+  middleName: titleCase(entity.middle_name),
+  lastName: titleCase(entity.last_name),
+  dateOfBirth: parseDate(entity.date_of_birth),
+  gender: parseGender(entity.gender),
+  phone: parsePhone(phone),
+});
 
-    const url = new URL('/api/v1/kyc/nin', env.DOJAH_BASE_URL);
-    url.searchParams.set('nin', nin);
+const lookup = async (
+  path: string,
+  params: Record<string, string>,
+  notFound: () => AppError,
+): Promise<Entity> => {
+  if (!env.DOJAH_ENABLED) throw dojahDisabled();
 
-    const response = await fetchWithTimeout(
-      url.toString(),
-      {
-        method: 'GET',
-        headers: {
-          AppId: env.DOJAH_APP_ID ?? '',
-          Authorization: env.DOJAH_SECRET_KEY ?? '',
-          Accept: 'application/json',
-        },
+  const url = new URL(path, env.DOJAH_BASE_URL);
+  for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+
+  const response = await fetchWithTimeout(
+    url.toString(),
+    {
+      method: 'GET',
+      headers: {
+        AppId: env.DOJAH_APP_ID ?? '',
+        Authorization: env.DOJAH_SECRET_KEY ?? '',
+        Accept: 'application/json',
       },
-      env.DOJAH_TIMEOUT_MS,
-      { timeout: timedOut, network: unavailable },
+    },
+    env.DOJAH_TIMEOUT_MS,
+    { timeout: timedOut, network: unavailable },
+  );
+
+  const { status } = response;
+  const parsed = parseJsonBody(await response.text()) as { entity?: unknown } | null | undefined;
+
+  if (status === 401 || status === 403) {
+    logger.error({ status, path }, 'Dojah denied access. Check DOJAH_APP_ID and DOJAH_SECRET_KEY');
+    throw new AppError(
+      'Identity verification could not be reached',
+      HttpStatus.BAD_GATEWAY,
+      'IDENTITY_PROVIDER_AUTH_FAILED',
     );
+  }
+  if (status === 402) {
+    logger.error({ path }, 'Dojah wallet balance is too low. Top up the Dojah wallet');
+    throw unavailable();
+  }
+  if (status === 424 || status === 429 || status >= 500) {
+    logger.warn({ status, path }, 'Dojah lookup failed');
+    throw unavailable();
+  }
+  if (status >= 400) throw notFound();
 
-    const { status } = response;
-    const parsed = parseJsonBody(await response.text()) as
-      { entity?: DojahNinEntity; error?: string } | null | undefined;
+  const entity = parsed?.entity;
+  if (!entity || typeof entity !== 'object' || Array.isArray(entity)) {
+    logger.warn({ status, path }, 'Dojah returned an unexpected response');
+    throw badResponse();
+  }
+  return entity as Entity;
+};
 
-    // Never log the NIN or the response: both are personal data.
-    if (status === 401 || status === 403) {
-      logger.error({ status }, 'Dojah denied access. Check DOJAH_APP_ID and DOJAH_SECRET_KEY');
-      throw new AppError(
-        'Identity verification could not be reached',
-        HttpStatus.BAD_GATEWAY,
-        'IDENTITY_PROVIDER_AUTH_FAILED',
-      );
-    }
-    if (status === 429 || status >= 500) {
-      logger.warn({ status }, 'Dojah NIN lookup failed');
-      throw unavailable();
-    }
-    // Dojah answers 400 or 404 with { error } for a NIN it can't find.
-    if (status >= 400) throw ninNotFound();
+const assertNamed = (identity: PersonIdentity, notFound: () => AppError) => {
+  if (!identity.firstName && !identity.lastName) throw notFound();
+  return identity;
+};
 
-    const entity = parsed?.entity;
-    if (!entity || typeof entity !== 'object') {
-      logger.warn({ status }, 'Dojah returned an unexpected NIN response');
-      throw new AppError(
-        'Identity verification returned an unexpected response',
-        HttpStatus.BAD_GATEWAY,
-        'IDENTITY_PROVIDER_BAD_RESPONSE',
-      );
-    }
-    if (!clean(entity.first_name) && !clean(entity.last_name)) throw ninNotFound();
+export const bvnNotFound = () =>
+  AppError.badRequest('We could not find a record for that BVN', 'BVN_NOT_FOUND');
 
+export const companyNotFound = () =>
+  AppError.badRequest(
+    'We could not find a company with that registration number and type',
+    'COMPANY_NOT_FOUND',
+  );
+
+export const accountNotFound = () =>
+  AppError.badRequest('We could not find that bank account', 'ACCOUNT_NOT_FOUND');
+
+export const dojahApi = {
+  async lookupNin(nin: string): Promise<NinIdentity> {
+    const entity = await lookup('/api/v1/kyc/nin', { nin }, ninNotFound);
+    return { nin, ...assertNamed(toIdentity(entity, entity.phone_number), ninNotFound) };
+  },
+
+  async lookupBvn(bvn: string): Promise<PersonIdentity> {
+    const entity = await lookup('/api/v1/kyc/bvn/full', { bvn }, bvnNotFound);
+    return assertNamed(toIdentity(entity, entity.phone_number1), bvnNotFound);
+  },
+
+  async lookupCompany(type: CompanyType, registrationNumber: string): Promise<CacCompany> {
+    const entity = await lookup(
+      '/api/v1/kyc/cac/advance',
+      { rc_number: registrationNumber, company_type: DOJAH_COMPANY_TYPES[type] },
+      companyNotFound,
+    );
+    const companyName = clean(entity.company_name);
+    if (!companyName) throw companyNotFound();
+
+    const affiliates = Array.isArray(entity.affiliates) ? (entity.affiliates as Entity[]) : [];
     return {
-      nin,
-      firstName: titleCase(entity.first_name),
-      middleName: titleCase(entity.middle_name),
-      lastName: titleCase(entity.last_name),
-      dateOfBirth: parseDate(entity.date_of_birth),
-      gender: parseGender(entity.gender),
-      phone: parsePhone(entity.phone_number),
+      companyName: titleCase(companyName) ?? companyName,
+      registrationNumber,
+      registeredOn: parseDate(entity.date_of_registration),
+      address: clean(entity.address),
+      city: clean(entity.city),
+      lga: clean(entity.lga),
+      state: clean(entity.state),
+      email: clean(entity.email)?.toLowerCase() ?? null,
+      status: clean(entity.status),
+      affiliates: affiliates
+        .map((affiliate) => ({
+          fullName: [titleCase(affiliate.first_name), titleCase(affiliate.last_name)]
+            .filter(Boolean)
+            .join(' '),
+          role: clean(affiliate.affiliate_type)?.toUpperCase() ?? 'DIRECTOR',
+        }))
+        .filter((affiliate) => affiliate.fullName.length > 1),
     };
+  },
+
+  async lookupTin(type: CompanyType, registrationNumber: string): Promise<string | null> {
+    try {
+      const entity = await lookup(
+        '/api/v1/kyc/cac/tin',
+        { rc_number: registrationNumber, company_type: DOJAH_COMPANY_TYPES[type] },
+        companyNotFound,
+      );
+      return clean(entity.tax_id);
+    } catch (err) {
+      if (err instanceof AppError && err.code === 'COMPANY_NOT_FOUND') return null;
+      throw err;
+    }
+  },
+
+  async resolveAccount(accountNumber: string, bankCode: string): Promise<string> {
+    const entity = await lookup(
+      '/api/v1/general/account',
+      { account_number: accountNumber, bank_code: bankCode },
+      accountNotFound,
+    );
+    const name = clean(entity.account_name);
+    if (!name) throw accountNotFound();
+    return name;
   },
 };

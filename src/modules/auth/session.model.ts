@@ -3,10 +3,8 @@ import { createSchema } from '@/core/database/createSchema';
 
 export interface ISession {
   user: Types.ObjectId;
-  /** SHA-256 of the refresh token. The token itself is never stored. */
   tokenHash: string;
   expiresAt: Date;
-  /** Set once the token has been used or revoked. Kept so that reuse can be detected. */
   revokedAt: Date | null;
   userAgent: string | null;
   ip: string | null;

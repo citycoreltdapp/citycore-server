@@ -16,7 +16,6 @@ const invalidRefreshToken = () =>
   AppError.unauthorized('Invalid or expired refresh token', 'INVALID_REFRESH_TOKEN');
 
 export const sessionService = {
-  /** Starts a session and returns its refresh token. */
   async create(userId: string, client: ClientInfo): Promise<string> {
     const token = generateOpaqueToken();
     await SessionModel.create({

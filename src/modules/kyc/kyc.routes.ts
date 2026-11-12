@@ -17,8 +17,7 @@ const kycLimiter = createRateLimiter({
   message: 'Too many verification attempts, please try again later',
 });
 
-// Under images/ and documents/, so the files are cleaned up like any other upload.
-const passportPhotoUpload = createUploader({
+const selfieUpload = createUploader({
   subdirectory: 'images',
   allowedTypes: KYC_PHOTO_TYPES,
   maxSizeMb: env.MAX_IMAGE_SIZE_MB,
@@ -54,19 +53,31 @@ router.post(
 router.get('/', kyc.getState);
 router.post('/nin', kycLimiter, kyc.verifyNin);
 router.put('/details', kyc.saveDetails);
+router.post('/business', kycLimiter, kyc.lookupBusiness);
+router.put('/business/details', kyc.saveBusinessDetails);
+router.post('/business/signatory', kycLimiter, kyc.verifySignatory);
+router.put('/business/payout', kycLimiter, kyc.savePayout);
+router.put('/selfie', uploadLimiter, kycUploadGuard('selfie'), ...selfieUpload, kyc.uploadSelfie);
 router.put(
-  '/passport-photo',
+  '/company-logo',
   uploadLimiter,
-  kycUploadGuard,
-  ...passportPhotoUpload,
-  kyc.uploadPassportPhoto,
+  kycUploadGuard('companyLogo'),
+  ...selfieUpload,
+  kyc.uploadCompanyLogo,
 );
 router.put(
   '/utility-bill',
   uploadLimiter,
-  kycUploadGuard,
+  kycUploadGuard('utilityBill'),
   ...utilityBillUpload,
   kyc.uploadUtilityBill,
+);
+router.put(
+  '/authorisation-letter',
+  uploadLimiter,
+  kycUploadGuard('authorisationLetter'),
+  ...utilityBillUpload,
+  kyc.uploadAuthorisationLetter,
 );
 router.post('/submit', kyc.submit);
 

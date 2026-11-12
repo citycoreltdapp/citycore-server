@@ -4,6 +4,7 @@ import jwt from 'jsonwebtoken';
 import request from 'supertest';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '@/app';
+import { signupBody } from './signup';
 import { connectDatabase, disconnectDatabase } from '@/config/database';
 import { googleApi } from '@/integrations/google/google.client';
 import { EmailLogModel } from '@/modules/email/email.model';
@@ -34,7 +35,7 @@ interface Account {
 const register = async (email: string, body: object = {}): Promise<Account> => {
   const res = await request(app)
     .post(`${API}/auth/register`)
-    .send({ email, password: PASSWORD, ...body });
+    .send(signupBody({ email, password: PASSWORD, ...body }));
   expect(res.status).toBe(201);
   return {
     id: res.body.data.user.id as string,
@@ -115,7 +116,7 @@ describe('signing up with email', () => {
   it('needs only an email and password, and gives every account a code', async () => {
     const res = await request(app)
       .post(`${API}/auth/register`)
-      .send({ email: 'jane.doe@example.com', password: PASSWORD });
+      .send(signupBody({ email: 'jane.doe@example.com', password: PASSWORD }));
 
     expect(res.status).toBe(201);
     expect(res.body.data.user).toMatchObject({
@@ -131,14 +132,14 @@ describe('signing up with email', () => {
   it('falls back to a placeholder when the email has no usable name', async () => {
     const res = await request(app)
       .post(`${API}/auth/register`)
-      .send({ email: '12345@example.com', password: PASSWORD });
+      .send(signupBody({ email: '12345@example.com', password: PASSWORD }));
     expect(res.body.data.user.name).toBe('New Customer');
   });
 
   it('links the new account to whoever owns the code, in any case', async () => {
     const referrer = await register('ref@example.com');
     const referee = await register('new@example.com', {
-      referralCode: ` ${referrer.code.toLowerCase()} `,
+      referrer: ` ${referrer.code.toLowerCase()} `,
     });
 
     const referral = await ReferralModel.findOne({ referee: referee.id }).lean();
@@ -156,7 +157,7 @@ describe('signing up with email', () => {
   ])('treats a %s code as no code', async (_label, referralCode) => {
     const res = await request(app)
       .post(`${API}/auth/register`)
-      .send({ email: 'new@example.com', password: PASSWORD, referralCode });
+      .send(signupBody({ email: 'new@example.com', password: PASSWORD, referrer: referralCode }));
     expect(res.status).toBe(201);
     expect(await ReferralModel.countDocuments()).toBe(0);
   });
@@ -164,7 +165,7 @@ describe('signing up with email', () => {
   it('refuses an unknown code without creating the account', async () => {
     const res = await request(app)
       .post(`${API}/auth/register`)
-      .send({ email: 'new@example.com', password: PASSWORD, referralCode: 'NOPE1234' });
+      .send(signupBody({ email: 'new@example.com', password: PASSWORD, referrer: 'NOPE1234' }));
 
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('INVALID_REFERRAL_CODE');
@@ -177,7 +178,7 @@ describe('signing up with email', () => {
 
     const res = await request(app)
       .post(`${API}/auth/register`)
-      .send({ email: 'new@example.com', password: PASSWORD, referralCode: referrer.code });
+      .send(signupBody({ email: 'new@example.com', password: PASSWORD, referrer: referrer.code }));
     expect(res.body.code).toBe('INVALID_REFERRAL_CODE');
   });
 });
@@ -499,7 +500,7 @@ describe('the prompt after a Google signup', () => {
 const setUpReferral = async () => {
   await setRate(500);
   const referrer = await register('ref@example.com');
-  const referee = await register('sam.bell@example.com', { referralCode: referrer.code });
+  const referee = await register('sam.bell@example.com', { referrer: referrer.code });
   return { referrer, referee };
 };
 
@@ -560,12 +561,12 @@ describe('the referral page', () => {
     expect(first.body.data.code).toMatch(/^[A-Z2-9]{8}$/);
     expect((await page(auth)).body.data.code).toBe(first.body.data.code);
     // The new code works straight away.
-    await register('friend@example.com', { referralCode: first.body.data.code });
+    await register('friend@example.com', { referrer: first.body.data.code });
   });
 
   it('adds up referrals and earnings', async () => {
     const { referrer, referee } = await setUpReferral();
-    await register('two@example.com', { referralCode: referrer.code });
+    await register('two@example.com', { referrer: referrer.code });
     await paidCommission(referee.id);
 
     const res = await page(referrer.auth);
@@ -678,7 +679,7 @@ describe('recording a commission', () => {
 
   it('earns nothing until a rate is set', async () => {
     const referrer = await register('ref@example.com');
-    const referee = await register('new@example.com', { referralCode: referrer.code });
+    const referee = await register('new@example.com', { referrer: referrer.code });
     const res = await recordInvestment(referee.id);
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('COMMISSION_RATE_NOT_SET');
@@ -898,7 +899,7 @@ describe('moving a commission along', () => {
 
   it('stops staff acting on their own earnings', async () => {
     await setRate(500);
-    const staffReferee = await register('sam@example.com', { referralCode: admin.code });
+    const staffReferee = await register('sam@example.com', { referrer: admin.code });
 
     const created = await recordInvestment(staffReferee.id);
     expect(created.status).toBe(403);
@@ -1073,7 +1074,7 @@ describe('managing referrals', () => {
 
   it('adds up the whole programme', async () => {
     const { referrer, referee } = await setUpReferral();
-    await register('two@example.com', { referralCode: referrer.code });
+    await register('two@example.com', { referrer: referrer.code });
     await paidCommission(referee.id);
 
     const res = await request(app).get(`${ADMIN}/stats`).set('Authorization', admin.auth);
